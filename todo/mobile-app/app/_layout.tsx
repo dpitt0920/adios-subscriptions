@@ -55,7 +55,9 @@ function RootNavigator() {
           name="task/[id]"
           options={{ headerShown: false, animation: "slide_from_right" }}
         />
+        <Stack.Screen name="preferences" options={{ presentation: "modal" }} />
       </Stack.Protected>
+      <Stack.Screen name="google-connected" />
     </Stack>
   );
 }

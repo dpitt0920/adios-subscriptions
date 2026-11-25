@@ -2,9 +2,11 @@ import { Pressable, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import classNames from "classnames";
+import { AgentStatusBadge } from "@/components/AgentStatusBadge";
 import { AppText } from "@/components/AppText";
 import { colors, priorityColor } from "@/lib/constants";
 import { formatDue, isOverdue } from "@/lib/dates";
+import { pileMeta } from "@/lib/piles";
 import { useTasks, type Task } from "@/providers/TasksProvider";
 
 interface TaskRowProps {
@@ -19,6 +21,8 @@ export function TaskRow({ task, index, showSubtaskCount = true }: TaskRowProps) 
   const doneSubtasks = subtasks.filter((s) => s.completed).length;
   const due = formatDue(task.dueDate, task.dueTime);
   const overdue = !task.completed && isOverdue(task.dueDate);
+  const pile = pileMeta(task.pile);
+  const agentStatus = task.completed && task.agentStatus !== "working" ? null : task.agentStatus;
 
   return (
     <Pressable
@@ -52,8 +56,16 @@ export function TaskRow({ task, index, showSubtaskCount = true }: TaskRowProps) 
         >
           {task.title}
         </AppText>
-        {(due || subtasks.length > 0 || task.estimateMinutes) && (
+        {(pile || due || subtasks.length > 0 || task.estimateMinutes) && (
           <View className="flex-row items-center mt-1" style={{ gap: 10 }}>
+            {pile && (
+              <View className="flex-row items-center" style={{ gap: 3 }}>
+                <Ionicons name={pile.icon} size={11} color={pile.color} />
+                <AppText className="text-xs" style={{ color: pile.color }}>
+                  {pile.short}
+                </AppText>
+              </View>
+            )}
             {due && (
               <View className="flex-row items-center" style={{ gap: 3 }}>
                 <Ionicons
@@ -88,6 +100,11 @@ export function TaskRow({ task, index, showSubtaskCount = true }: TaskRowProps) 
           </View>
         )}
       </View>
+      {agentStatus && agentStatus !== "idle" && agentStatus !== "done" && (
+        <View className="self-center">
+          <AgentStatusBadge status={agentStatus} color={pile?.color} />
+        </View>
+      )}
     </Pressable>
   );
 }

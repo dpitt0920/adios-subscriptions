@@ -1,4 +1,5 @@
-import { Tabs } from "expo-router";
+import { useEffect } from "react";
+import { router, Tabs, usePathname } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/lib/constants";
 
@@ -11,9 +12,24 @@ function tabIcon(name: IconName, activeName: IconName) {
   return TabIcon;
 }
 
+// Home (the dashboard) is the tab the app opens on.
+export const unstable_settings = { initialRouteName: "home" };
+
+// The root URL "/" resolves to the Today screen (index), so on the first mount
+// of the tab bar we move to Home once. Later taps on Today are left alone.
+let openedHome = false;
+
 export default function TabsLayout() {
+  const pathname = usePathname();
+  useEffect(() => {
+    if (openedHome) return;
+    openedHome = true;
+    if (pathname === "/") router.replace("/home");
+  }, [pathname]);
+
   return (
     <Tabs
+      initialRouteName="home"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
@@ -21,6 +37,10 @@ export default function TabsLayout() {
         tabBarStyle: { borderTopColor: "#F0F0F3" },
       }}
     >
+      <Tabs.Screen
+        name="home"
+        options={{ title: "Home", tabBarIcon: tabIcon("grid-outline", "grid") }}
+      />
       <Tabs.Screen
         name="index"
         options={{ title: "Today", tabBarIcon: tabIcon("sunny-outline", "sunny") }}

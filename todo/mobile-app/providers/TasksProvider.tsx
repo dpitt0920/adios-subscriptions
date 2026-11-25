@@ -1,8 +1,11 @@
 import { createContext, useCallback, useContext, useMemo, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { InferResponseType } from "hono/client";
+import { Toast } from "toastify-react-native";
 import { api } from "@/lib/api";
 import { Cache, CACHE_KEYS } from "@/lib/cache";
+import { localNowString, timeZone } from "@/lib/dates";
+import type { Area, Pile } from "@/lib/piles";
 import { useAuth } from "@/providers/AuthProvider";
 
 const $list = api.api.tasks.$get;
@@ -15,6 +18,8 @@ export type TaskPatch = {
   dueDate?: string | null;
   dueTime?: string | null;
   completed?: boolean;
+  area?: Area | null;
+  pile?: Pile | null;
 };
 
 type TasksContextType = {
@@ -28,10 +33,17 @@ type TasksContextType = {
   updateTask: (id: string, patch: TaskPatch) => Promise<void>;
   toggleComplete: (task: Task) => Promise<void>;
   removeTask: (id: string) => Promise<void>;
+  /** Start Claude working on a task in the background. Returns true if it started. */
+  runTask: (id: string) => Promise<boolean>;
+  /** Start several tasks at once; shows a single summary toast. */
+  runTasks: (ids: string[]) => Promise<number>;
 };
 
 const TasksContext = createContext<TasksContextType | undefined>(undefined);
 const QUERY_KEY = ["tasks"];
+const POLL_MS = 4000;
+
+type RunResult = "started" | "already" | "error";
 
 export function useTasks() {
   const ctx = useContext(TasksContext);
@@ -54,6 +66,9 @@ export function TasksProvider({ children }: { children: ReactNode }) {
       Cache.set(CACHE_KEYS.TASKS, data);
       return data;
     },
+    // Poll only while Claude is working on something.
+    refetchInterval: (q) =>
+      q.state.data?.some((t) => t.agentStatus === "working") ? POLL_MS : false,
   });
 
   const tasks = useMemo(() => query.data ?? [], [query.data]);
@@ -94,6 +109,26 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     onSettled: invalidate,
   });
 
+  const startRun = useCallback(
+    async (id: string): Promise<RunResult> => {
+      setLocal((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, agentStatus: "working" as const } : t))
+      );
+      try {
+        const res = await api.api.tasks[":id"].run.$post({
+          param: { id },
+          json: { localNow: localNowString(), timeZone: timeZone() },
+        });
+        const status: number = res.status;
+        if (status === 409) return "already";
+        return res.ok ? "started" : "error";
+      } catch {
+        return "error";
+      }
+    },
+    [setLocal]
+  );
+
   const value: TasksContextType = {
     tasks,
     loading: query.isPending,
@@ -118,6 +153,23 @@ export function TasksProvider({ children }: { children: ReactNode }) {
       const res = await api.api.tasks[":id"].$delete({ param: { id } });
       await invalidate();
       if (!res.ok) throw new Error("Failed to delete task");
+    },
+    runTask: async (id) => {
+      const result = await startRun(id);
+      if (result === "already") Toast.info("Claude is already working on this");
+      else if (result === "error") Toast.error("Couldn't start Claude on this task");
+      await invalidate();
+      return result === "started";
+    },
+    runTasks: async (ids) => {
+      const results = await Promise.all(ids.map(startRun));
+      const started = results.filter((r) => r === "started").length;
+      const failed = results.filter((r) => r === "error").length;
+      if (failed > 0) Toast.error(`Couldn't start ${failed} of ${ids.length} tasks`);
+      else if (started > 0)
+        Toast.success(`Claude started on ${started} task${started === 1 ? "" : "s"}`);
+      await invalidate();
+      return started;
     },
   };
 

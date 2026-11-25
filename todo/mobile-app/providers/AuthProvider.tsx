@@ -16,6 +16,8 @@ export interface UserProfile {
   email: string;
   fullName: string | null;
   isOnboardingComplete: boolean;
+  /** "How I like things" profile the agent reads before every task. */
+  preferences: string | null;
 }
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
@@ -68,7 +70,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
         throw new Error("Failed to fetch user profile");
       }
       const data = await response.json();
-      const profile: UserProfile = { ...data, email: data.email ?? "" };
+      const profile: UserProfile = {
+        ...data,
+        email: data.email ?? "",
+        preferences: data.preferences ?? null,
+      };
       setUser(profile);
       Cache.set(CACHE_KEYS.USER_PROFILE, profile);
     } catch (err) {
