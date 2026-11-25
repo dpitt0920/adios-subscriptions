@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { ToolError } from "@anthropic-ai/sdk/lib/tools/ToolError";
 import { z } from "zod";
+import { areas, piles } from "../db/schema.js";
 import {
   createTasks,
   dateString,
@@ -20,6 +21,8 @@ import {
   updateTask,
   type Task,
 } from "./tasks.js";
+import { getPreferences } from "./users.js";
+import { startWorkerRun } from "./worker.js";
 
 const MODEL = "claude-opus-5-5";
 const MAX_TOOL_ITERATIONS = 12;
@@ -36,6 +39,13 @@ What you do:
 - Break down: when asked to split a task into steps, create 3-7 concrete subtasks with parent_id set to that task, each starting with a verb, with a rough estimate_minutes when you can judge one.
 - Plan the day: when asked for a plan, list open tasks, pick what fits the day (overdue and due-today first, then high priority, then quick wins; assume about 6 hours of focused time unless told otherwise), save it with set_daily_plan in the order to do them, and reply with the ordered plan and a one-line reason for anything important left out.
 
+Areas and piles: when you create a task, ALWAYS set its area (work, home, family, money, health, other) and its pile. The pile says who does the work; a separate worker agent later does the work on each task:
+- claude: Claude can do it alone. Research, looking things up, comparing options, writing or summarizing something, adding an event to the user's own calendar. E.g. "find a good plumber nearby", "research flights to Lisbon in March", "put the school play on my calendar".
+- together: Claude does most of it and the user finishes, because the user has to review, send, sign, pay or confirm. Emails (Claude drafts, the user sends), forms, bookings, bills, replies. E.g. "email the landlord about the leak", "book the dentist" (Claude finds options and drafts the request, the user confirms), "pay the water bill".
+- me: only the user can do it: physical or in-person things, phone calls, decisions only they can make. Claude still helps with a script, checklist or talking points. E.g. "call mom", "pick up dry cleaning", "decide on the new job offer", "go for a run".
+Set pile when you're reasonably sure; when unsure between together and me, choose together if Claude can prepare something useful.
+- Start: when the user asks you to do, work on or "go" on tasks (e.g. "go do the claude pile"), call start_task for each one. It starts the worker in the background and returns at once; tell the user it's working and the results will show on each task. Don't start tasks that are completed or already working.
+
 Delete only when the user clearly asked to delete or remove; "done" or "finished" means complete. Don't invent tasks the user didn't ask for, except subtasks when breaking a task down.`;
 
 function compactTask(t: Task) {
@@ -48,6 +58,9 @@ function compactTask(t: Task) {
     ...(t.dueDate ? { due_date: t.dueDate } : {}),
     ...(t.dueTime ? { due_time: t.dueTime } : {}),
     ...(t.estimateMinutes ? { estimate_minutes: t.estimateMinutes } : {}),
+    ...(t.area ? { area: t.area } : {}),
+    ...(t.pile ? { pile: t.pile } : {}),
+    ...(t.agentStatus !== "idle" ? { agent_status: t.agentStatus } : {}),
     ...(t.plannedDate
       ? { planned_date: t.plannedDate, plan_order: t.planOrder }
       : {}),
@@ -86,9 +99,17 @@ const newTaskFields = z.object({
     .uuid()
     .optional()
     .describe("Id of the parent task, to create a subtask"),
+  area: z.enum(areas).describe("Life area the task belongs to"),
+  pile: z
+    .enum(piles)
+    .describe("claude = Claude does it alone; together = Claude does most, the user finishes; me = only the user can do it"),
 });
 
-function buildTools(userId: string, changed: Set<string>) {
+function buildTools(
+  userId: string,
+  changed: Set<string>,
+  ctx: { localNow: string; timeZone: string }
+) {
   return [
     betaZodTool({
       name: "list_tasks",
@@ -127,6 +148,8 @@ function buildTools(userId: string, changed: Set<string>) {
               dueTime: t.due_time,
               estimateMinutes: t.estimate_minutes,
               parentId: t.parent_id,
+              area: t.area,
+              pile: t.pile,
             }))
           );
           created.forEach((t) => changed.add(t.id));
@@ -136,7 +159,7 @@ function buildTools(userId: string, changed: Set<string>) {
     betaZodTool({
       name: "update_task",
       description:
-        "Change a task: title, notes, priority, due date/time, estimate, or completion. Pass null to clear due_date, due_time, notes or estimate_minutes.",
+        "Change a task: title, notes, priority, due date/time, estimate, area, pile, or completion. Pass null to clear due_date, due_time, notes, estimate_minutes, area or pile.",
       inputSchema: z.object({
         id: z.string().uuid(),
         title: z.string().min(1).max(500).optional(),
@@ -145,6 +168,8 @@ function buildTools(userId: string, changed: Set<string>) {
         due_date: dateString.nullable().optional(),
         due_time: timeString.nullable().optional(),
         estimate_minutes: z.number().int().min(1).max(1440).nullable().optional(),
+        area: z.enum(areas).nullable().optional(),
+        pile: z.enum(piles).nullable().optional(),
         completed: z.boolean().optional(),
       }),
       run: async ({ id, due_date, due_time, estimate_minutes, ...rest }) =>
@@ -186,6 +211,20 @@ function buildTools(userId: string, changed: Set<string>) {
           return `Plan saved for ${date} with ${planned.length} task(s).`;
         }),
     }),
+    betaZodTool({
+      name: "start_task",
+      description:
+        "Start the worker agent on a task in the background (it researches, drafts, schedules or prepares help, following the task's pile). Returns immediately; the result appears on the task.",
+      inputSchema: z.object({ id: z.string().uuid() }),
+      run: async ({ id }) =>
+        withNotFound(async () => {
+          const result = await startWorkerRun(userId, id, ctx);
+          changed.add(id);
+          return result === "started"
+            ? "Started. The worker is on it in the background."
+            : "Already running; not started again.";
+        }),
+    }),
   ];
 }
 
@@ -206,6 +245,7 @@ export async function runAgent(opts: {
   timeZone: string;
 }): Promise<AgentResult> {
   const changed = new Set<string>();
+  const preferences = await getPreferences(opts.userId);
 
   const messages: Anthropic.Beta.BetaMessageParam[] = [
     ...opts.history.map((turn) => ({
@@ -227,8 +267,17 @@ export async function runAgent(opts: {
     betas: ["server-side-fallback-2026-07-01"],
     fallbacks: "default",
     cache_control: { type: "ephemeral" },
-    system: SYSTEM_PROMPT,
-    tools: buildTools(opts.userId, changed),
+    // Stable prompt first (cached), then this user's preferences.
+    system: [
+      { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+      {
+        type: "text",
+        text: preferences
+          ? `The user's "How I like things" preferences. Follow them in everything you do (e.g. how to word tasks, which pile fits them):\n<preferences>\n${preferences}\n</preferences>`
+          : `The user hasn't set any "How I like things" preferences.`,
+      },
+    ],
+    tools: buildTools(opts.userId, changed, opts),
     messages,
   });
 

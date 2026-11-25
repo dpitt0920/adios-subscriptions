@@ -7,11 +7,14 @@ import { users } from "../db/schema.js";
 import { authMiddleware } from "../middleware/auth.js";
 import type { AppEnv } from "../types.js";
 import agentRoutes from "./agent.js";
+import googleRoutes from "./google.js";
 import tasksRoutes from "./tasks.js";
 
 const updateMeSchema = z.object({
   fullName: z.string().trim().min(1).max(200).optional(),
   isOnboardingComplete: z.boolean().optional(),
+  // "How I like things": free text the agent reads before every task.
+  preferences: z.string().max(10000).nullable().optional(),
 });
 
 const api = new Hono<AppEnv>()
@@ -40,6 +43,7 @@ const api = new Hono<AppEnv>()
   })
   .route("/tasks", tasksRoutes)
   .route("/agent", agentRoutes)
+  .route("/google", googleRoutes)
   .get("/me", async (c) => {
     const authUser = c.get("user");
 
@@ -52,11 +56,18 @@ const api = new Hono<AppEnv>()
       email: authUser.email,
       fullName: dbUser?.fullName ?? null,
       isOnboardingComplete: dbUser?.isOnboardingComplete ?? false,
+      preferences: dbUser?.preferences ?? null,
     });
   })
   .patch("/me", zValidator("json", updateMeSchema), async (c) => {
     const authUser = c.get("user");
-    const updates = c.req.valid("json");
+    const { preferences, ...rest } = c.req.valid("json");
+    const updates = {
+      ...rest,
+      ...(preferences !== undefined
+        ? { preferences: preferences?.trim() ? preferences : null }
+        : {}),
+    };
 
     const [updated] = await db
       .update(users)
@@ -69,6 +80,7 @@ const api = new Hono<AppEnv>()
       email: authUser.email,
       fullName: updated?.fullName ?? null,
       isOnboardingComplete: updated?.isOnboardingComplete ?? false,
+      preferences: updated?.preferences ?? null,
     });
   })
   .get("/health", (c) => {
