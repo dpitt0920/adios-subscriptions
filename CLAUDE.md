@@ -13,9 +13,10 @@ building. Each sub-package has its own `package-lock.json` — use `npm`.
 | --------------- | ---------------------------------------------- | ------------------------------------------------------------------ |
 | `strong/`       | Workout tracker (templates, workouts, history) | Expo mobile app + Hono backend + Supabase (auth + Postgres)        |
 | `myfitnesspal/` | Food / calorie diary with barcode scanning     | Same stack as `strong/`; Open Food Facts lookup in the mobile app  |
+| `todo/`         | To-do app with a Claude assistant              | Same stack as `strong/`; Anthropic SDK tool runner in the backend  |
 | `note-taker/`   | Local meeting recorder + transcription         | Electron + electron-vite + React 19 + Tailwind v4 + shadcn; Gladia |
 
-## Mobile + backend projects (`strong/`, `myfitnesspal/`)
+## Mobile + backend projects (`strong/`, `myfitnesspal/`, `todo/`)
 
 Both share the same layout and conventions:
 
@@ -53,6 +54,16 @@ Both share the same layout and conventions:
   Backend route changes therefore affect mobile type-checking.
 - Config comes from `mobile-app/.env` (`EXPO_PUBLIC_*`: API URL, Supabase keys).
 - Auth: Supabase magic link and Sign in with Apple; onboarding flow after sign-in.
+
+### `todo/` agent
+
+- `backend/src/lib/agent.ts` runs the Claude agent through the Anthropic SDK tool
+  runner (`client.beta.messages.toolRunner` + `betaZodTool`). Tools are built per
+  request and bound to the user's id. Task data access is in `lib/tasks.ts`; the REST
+  routes and the agent tools both use it.
+- Keep `SYSTEM_PROMPT` byte-stable so it caches. Put per-request context (date,
+  time zone) in the user message.
+- Needs `ANTHROPIC_API_KEY` in `backend/.env`.
 
 ## `note-taker/` (Electron)
 
